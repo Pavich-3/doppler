@@ -1,22 +1,14 @@
 #include "main.h"
 #include "stdbool.h"
 
-#define AUDIO_BUFFER_SIZE 2048
-
-int32_t i2s1_rx_buffer[AUDIO_BUFFER_SIZE * 2];
-int32_t i2s4_rx_buffer[AUDIO_BUFFER_SIZE * 2];
-
-volatile int32_t* i2s1_data_ptr = NULL;
-volatile int32_t* i2s4_data_ptr = NULL;
-volatile bool i2s1_data_ready = false;
-volatile bool i2s4_data_ready = false;
-
 TIM_HandleTypeDef timerHandle = {0};
 I2S_HandleTypeDef i2s1Handle = {0};
 I2S_HandleTypeDef i2s4Handle = {0};
 
 I2S_HandleTypeDef* i2sHandles[2] = {&i2s1Handle, &i2s4Handle};
 SPI_TypeDef* i2sInstances[2] = {SPI1, SPI4};
+
+static DroneTracker_t tracker;
 
 void SystemClock_Config(void);
 
@@ -26,12 +18,15 @@ int main(void)
   SystemClock_Config();
   TIMER_Init(&timerHandle);
   I2S_Init(i2sHandles, i2sInstances, 2);
-  HAL_I2S_Receive_DMA(&i2s1Handle, (uint16_t*)i2s1_rx_buffer, AUDIO_BUFFER_SIZE * 4);
-  HAL_I2S_Receive_DMA(&i2s4Handle, (uint16_t*)i2s4_rx_buffer, AUDIO_BUFFER_SIZE * 4);
+
+  DroneTracker_Init(&tracker);
+
+  HAL_I2S_Receive_DMA(&i2s1Handle, (uint16_t*)tracker.i2s1_rx_buffer, AUDIO_BUFFER_SIZE * 4);
+  HAL_I2S_Receive_DMA(&i2s4Handle, (uint16_t*)tracker.i2s4_rx_buffer, AUDIO_BUFFER_SIZE * 4);
 
   while (1)
   {
-
+	  DroneTracker_Process(&tracker);
   }
 }
 
@@ -39,13 +34,13 @@ void HAL_I2S_RxHalfCpltCallback(I2S_HandleTypeDef *hi2s)
 {
   if (hi2s->Instance == SPI1)
   {
-    i2s1_data_ptr = &i2s1_rx_buffer[0];
-    i2s1_data_ready = true;
+	  tracker.i2s1_active_ptr = &tracker.i2s1_rx_buffer[0];
+	  tracker.i2s1_data_ready = true;
   }
   else if (hi2s->Instance == SPI4)
   {
-    i2s4_data_ptr = &i2s4_rx_buffer[0];
-    i2s4_data_ready = true;
+	  tracker.i2s4_active_ptr = &tracker.i2s4_rx_buffer[0];
+	  tracker.i2s4_data_ready = true;
   }
 }
 
@@ -53,15 +48,16 @@ void HAL_I2S_RxCpltCallback(I2S_HandleTypeDef *hi2s)
 {
   if (hi2s->Instance == SPI1)
   {
-    i2s1_data_ptr = &i2s1_rx_buffer[AUDIO_BUFFER_SIZE];
-    i2s1_data_ready = true;
+	  tracker.i2s1_active_ptr = &tracker.i2s1_rx_buffer[AUDIO_BUFFER_SIZE];
+	  tracker.i2s1_data_ready = true;
   }
   else if (hi2s->Instance == SPI4)
   {
-    i2s4_data_ptr = &i2s4_rx_buffer[AUDIO_BUFFER_SIZE];
-    i2s4_data_ready = true;
+	  tracker.i2s4_active_ptr = &tracker.i2s4_rx_buffer[AUDIO_BUFFER_SIZE];
+	  tracker.i2s4_data_ready = true;
   }
 }
+
 
 void SystemClock_Config(void)
 {

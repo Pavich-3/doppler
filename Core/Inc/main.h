@@ -8,6 +8,7 @@ extern "C" {
 #include "stm32f4xx_hal.h"
 #include "timer.h"
 #include "i2s.h"
+#include "drone_tracker.h"
 
 void Error_Handler(void);
 
