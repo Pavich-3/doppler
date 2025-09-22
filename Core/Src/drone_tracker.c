@@ -1,10 +1,19 @@
 #include "drone_tracker.h"
 
+extern TIM_HandleTypeDef timerHandle;
+
 #define DRONE_THRESHOLD 15.0f
 
 static const float32_t SAMPLE_RATE = 32000.0f;
 static const float32_t MIC_DISTANCE = 0.15f;
 static const float32_t SOUND_SPEED = 343.0f;
+
+const float32_t input_angle_min = -60.0f;
+const float32_t input_angle_max = 60.0f;
+
+const uint32_t pulse_min = 750;
+const uint32_t pulse_center = 1500;
+const uint32_t pulse_max = 2250;
 
 static float32_t filter_coeffs[NUM_STAGES * 5] = {
     0.01733589f, 0.03467177f, 0.01733589f, 0.72652296f, -0.17059273f,
@@ -15,7 +24,8 @@ static float32_t filter_coeffs[NUM_STAGES * 5] = {
 
 static void deinterleave_and_convert(volatile int32_t* dma_buffer, float32_t* left_channel_out, float32_t* right_channel_out, uint32_t num_samples);
 static float32_t calculate_tdoa_angle(DroneTracker_t* tracker, float32_t* micA_samples, float32_t* micB_samples);
-
+static float32_t smooth_angle(float32_t new_angle, float32_t* history_buffer, uint32_t* history_index);
+static void set_servo_position(uint32_t channel, float32_t angle);
 
 void DroneTracker_Init(DroneTracker_t* tracker)
 {
@@ -75,6 +85,12 @@ void DroneTracker_Process(DroneTracker_t* tracker)
 
                 tracker->azimuth = calculate_tdoa_angle(tracker, tracker->mic_samples[0], tracker->mic_samples[1]);
                 tracker->elevation = calculate_tdoa_angle(tracker, tracker->mic_samples[2], tracker->mic_samples[3]);
+
+                tracker->smoothed_azimuth = smooth_angle(tracker->azimuth, tracker->azimuth_history, &tracker->azimuth_history_index);
+                tracker->smoothed_elevation = smooth_angle(tracker->elevation, tracker->elevation_history, &tracker->elevation_history_index);
+
+                set_servo_position(TIM_CHANNEL_2, tracker->smoothed_azimuth);
+                set_servo_position(TIM_CHANNEL_3, tracker->smoothed_elevation);
             }
             else
             {
@@ -117,4 +133,27 @@ static float32_t calculate_tdoa_angle(DroneTracker_t* tracker, float32_t* micA_s
     float32_t angle_deg = angle_rad * (180.0f / M_PI);
 
     return angle_deg;
+}
+
+static float32_t smooth_angle(float32_t new_angle, float32_t* history_buffer, uint32_t* history_index)
+{
+	history_buffer[*history_index] = new_angle;
+
+	*history_index = (*history_index +1) % ANGLE_SMOOTHING_WINDOW_SIZE;
+
+	float32_t sum = 0.0f;
+	for (int i = 0; i < ANGLE_SMOOTHING_WINDOW_SIZE; i++)
+		sum += history_buffer[i];
+
+	return sum / ANGLE_SMOOTHING_WINDOW_SIZE;
+}
+
+static void set_servo_position(uint32_t channel, float32_t angle)
+{
+	if (angle < input_angle_min) angle = input_angle_min;
+	if (angle > input_angle_max) angle = input_angle_max;
+
+	float32_t mapped_value = pulse_center * (angle / input_angle_max) * (pulse_max - pulse_center);
+
+	__HAL_TIM_SET_COMPARE(&timerHandle, channel, (uint32_t)mapped_value);
 }

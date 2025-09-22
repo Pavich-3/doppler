@@ -9,6 +9,7 @@
 #define ANALYSIS_SIZE 1024
 #define FFT_SIZE 1024
 #define NUM_STAGES 4
+#define ANGLE_SMOOTHING_WINDOW_SIZE 10
 
 typedef enum {
 	STATE_LISTENING,
@@ -40,6 +41,14 @@ typedef struct {
 
     float32_t azimuth;
     float32_t elevation;
+
+    float32_t azimuth_history[ANGLE_SMOOTHING_WINDOW_SIZE];
+    float32_t elevation_history[ANGLE_SMOOTHING_WINDOW_SIZE];
+    uint32_t azimuth_history_index;
+    uint32_t elevation_history_index;
+
+    float32_t smoothed_azimuth;
+    float32_t smoothed_elevation;
 
 } DroneTracker_t;
 
