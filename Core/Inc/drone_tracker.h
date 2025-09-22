@@ -7,10 +7,19 @@
 
 #define AUDIO_BUFFER_SIZE 2048
 #define ANALYSIS_SIZE 1024
-#define NUM_STAGES 4
 #define FFT_SIZE 1024
+#define NUM_STAGES 4
+
+typedef enum {
+	STATE_LISTENING,
+	STATE_TRACKING
+} TrackerState_t;
 
 typedef struct {
+	TrackerState_t current_state;
+	uint32_t detection_counter;
+	uint32_t lost_counter;
+
     int32_t i2s1_rx_buffer[AUDIO_BUFFER_SIZE * 2];
     int32_t i2s4_rx_buffer[AUDIO_BUFFER_SIZE * 2];
 

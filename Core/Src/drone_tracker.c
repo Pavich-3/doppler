@@ -19,47 +19,80 @@ static float32_t calculate_tdoa_angle(DroneTracker_t* tracker, float32_t* micA_s
 
 void DroneTracker_Init(DroneTracker_t* tracker)
 {
+	tracker->current_state = STATE_LISTENING;
+	tracker->detection_counter = 0;
+	tracker->lost_counter = 0;
+
     arm_biquad_cascade_df1_init_f32(&tracker->filter_instance, NUM_STAGES, filter_coeffs, tracker->filter_state);
     arm_rfft_fast_init_f32(&tracker->fft_instance, FFT_SIZE);
 }
 
 void DroneTracker_Process(DroneTracker_t* tracker)
 {
-	if (tracker->i2s1_data_ready && tracker->i2s4_data_ready)
-	{
-		volatile int32_t* local_i2s1_ptr = tracker->i2s1_active_ptr;
-		volatile int32_t* local_i2s4_ptr = tracker->i2s4_active_ptr;
-		tracker->i2s1_data_ready = false;
-		tracker->i2s4_data_ready = false;
+    if (!tracker->i2s1_data_ready || !tracker->i2s4_data_ready) return;
 
-		for(int i = 0; i < ANALYSIS_SIZE; i++) {
-			tracker->processing_buffer[i] = (float32_t)local_i2s1_ptr[2*i + 1];
-		}
+    volatile int32_t* local_i2s1_ptr = tracker->i2s1_active_ptr;
+    volatile int32_t* local_i2s2_ptr = tracker->i2s4_active_ptr;
+    tracker->i2s1_data_ready = false;
+    tracker->i2s4_data_ready = false;
 
-		arm_biquad_cascade_df1_f32(&tracker->filter_instance, tracker->processing_buffer, tracker->processing_buffer, ANALYSIS_SIZE);
-		arm_rfft_fast_f32(&tracker->fft_instance, tracker->processing_buffer, tracker->fft_output, 0);
-		arm_cmplx_mag_f32(tracker->fft_output, tracker->magnitudes, FFT_SIZE / 2);
+    arm_copy_f32(tracker->mic_samples[0], tracker->processing_buffer, ANALYSIS_SIZE);
+    deinterleave_and_convert(local_i2s1_ptr, tracker->mic_samples[0], tracker->mic_samples[1], ANALYSIS_SIZE);
 
-		float32_t max_peak, mean_energy;
-		uint32_t max_peak_index;
+    arm_biquad_cascade_df1_f32(&tracker->filter_instance, tracker->processing_buffer, tracker->processing_buffer, ANALYSIS_SIZE);
+    arm_rfft_fast_f32(&tracker->fft_instance, tracker->processing_buffer, tracker->fft_output, 0);
+    arm_cmplx_mag_f32(tracker->fft_output, tracker->magnitudes, FFT_SIZE / 2);
 
-		arm_mean_f32(tracker->magnitudes, FFT_SIZE / 2, &mean_energy);
-		arm_max_f32(tracker->magnitudes, FFT_SIZE / 2, &max_peak, &max_peak_index);
+    float32_t max_peak, mean_energy;
+    uint32_t max_peak_index;
+    arm_mean_f32(tracker->magnitudes, FFT_SIZE / 2, &mean_energy);
+    arm_max_f32(tracker->magnitudes, FFT_SIZE / 2, &max_peak, &max_peak_index);
 
-		if (max_peak > mean_energy * DRONE_THRESHOLD)
-		{
-			deinterleave_and_convert(local_i2s1_ptr, tracker->mic_samples[0], tracker->mic_samples[1], ANALYSIS_SIZE);
-			deinterleave_and_convert(local_i2s4_ptr, tracker->mic_samples[2], tracker->mic_samples[3], ANALYSIS_SIZE);
+    bool is_drone_signature_present = (max_peak > mean_energy * DRONE_THRESHOLD);
 
-			tracker->azimuth = calculate_tdoa_angle(tracker, tracker->mic_samples[0], tracker->mic_samples[1]);
-			tracker->elevation = calculate_tdoa_angle(tracker, tracker->mic_samples[2], tracker->mic_samples[3]);
-		}
-	}
+    switch (tracker->current_state)
+    {
+        case STATE_LISTENING:
+            if (is_drone_signature_present)
+            {
+                tracker->detection_counter++;
+                if (tracker->detection_counter >= 3)
+                {
+                    tracker->current_state = STATE_TRACKING;
+                    tracker->lost_counter = 0;
+                }
+            }
+            else
+                tracker->detection_counter = 0;
+            break;
+
+        case STATE_TRACKING:
+            if (is_drone_signature_present)
+            {
+                tracker->lost_counter = 0;
+
+                deinterleave_and_convert(local_i2s2_ptr, tracker->mic_samples[2], tracker->mic_samples[3], ANALYSIS_SIZE);
+
+                tracker->azimuth = calculate_tdoa_angle(tracker, tracker->mic_samples[0], tracker->mic_samples[1]);
+                tracker->elevation = calculate_tdoa_angle(tracker, tracker->mic_samples[2], tracker->mic_samples[3]);
+            }
+            else
+            {
+                tracker->lost_counter++;
+                if (tracker->lost_counter >= 10)
+                {
+                    tracker->current_state = STATE_LISTENING;
+                    tracker->detection_counter = 0;
+                }
+            }
+            break;
+    }
 }
 
 static void deinterleave_and_convert(volatile int32_t* dma_buffer, float32_t* left_channel_out, float32_t* right_channel_out, uint32_t num_samples)
 {
-    for (uint32_t i = 0; i < num_samples; i++) {
+    for (uint32_t i = 0; i < num_samples; i++)
+    {
         right_channel_out[i] = (float32_t)dma_buffer[2 * i];
         left_channel_out[i]  = (float32_t)dma_buffer[2 * i + 1];
     }
