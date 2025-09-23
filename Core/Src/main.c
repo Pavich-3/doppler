@@ -1,98 +1,155 @@
+/**
+ * @file main.c
+ * @brief Main program body for the Drone Tracker project.
+ *
+ * This file contains the main entry point, system initialization routines,
+ * the main processing loop, and interrupt service routine callbacks for DMA.
+ */
+
 #include "main.h"
 #include "stdbool.h"
 
-#define AUDIO_BUFFER_SIZE 2048
+// --- Global HAL Handles ---
+// These handles are used by the HAL library to manage peripheral states.
+TIM_HandleTypeDef timerHandle = {0}; // Handle for the Timer peripheral (for PWM).
+I2S_HandleTypeDef i2s1Handle = {0};  // Handle for the first I2S peripheral.
+I2S_HandleTypeDef i2s4Handle = {0};  // Handle for the second I2S peripheral.
 
-int32_t i2s1_rx_buffer[AUDIO_BUFFER_SIZE * 2];
-int32_t i2s4_rx_buffer[AUDIO_BUFFER_SIZE * 2];
-
-volatile int32_t* i2s1_data_ptr = NULL;
-volatile int32_t* i2s4_data_ptr = NULL;
-volatile bool i2s1_data_ready = false;
-volatile bool i2s4_data_ready = false;
-
-TIM_HandleTypeDef timerHandle = {0};
-I2S_HandleTypeDef i2s1Handle = {0};
-I2S_HandleTypeDef i2s4Handle = {0};
-
+// --- Helper Arrays for Initialization ---
+// These arrays allow for initializing multiple I2S peripherals in a loop.
 I2S_HandleTypeDef* i2sHandles[2] = {&i2s1Handle, &i2s4Handle};
 SPI_TypeDef* i2sInstances[2] = {SPI1, SPI4};
 
-void SystemClock_Config(void);
+// --- Application Data Structure ---
+// A single static instance of the DroneTracker struct holds all application state and data.
+static DroneTracker_t tracker;
 
+// --- Function Prototypes ---
+void SystemClock_Config(void); // Configures the system clocks.
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
 int main(void)
 {
-  HAL_Init();
-  SystemClock_Config();
-  TIMER_Init(&timerHandle);
-  I2S_Init(i2sHandles, i2sInstances, 2);
-  HAL_I2S_Receive_DMA(&i2s1Handle, (uint16_t*)i2s1_rx_buffer, AUDIO_BUFFER_SIZE * 4);
-  HAL_I2S_Receive_DMA(&i2s4Handle, (uint16_t*)i2s4_rx_buffer, AUDIO_BUFFER_SIZE * 4);
+  // --- System Initialization ---
+  HAL_Init(); // Initialize the HAL library (must be the first function called).
+  SystemClock_Config(); // Configure the system clock sources and frequencies.
 
+  // --- Peripheral Initialization ---
+  TIMER_Init(&timerHandle); // Initialize the timer for servo PWM.
+  I2S_Init(i2sHandles, i2sInstances, 2); // Initialize the I2S peripherals for audio input.
+
+  // --- Application Initialization ---
+  DroneTracker_Init(&tracker); // Initialize the drone tracker's state and DSP components.
+
+  // --- Start Asynchronous Data Acquisition ---
+  // Start receiving audio data from both I2S peripherals using DMA in circular mode.
+  // The size is AUDIO_BUFFER_SIZE * 4 because:
+  // - The total buffer has AUDIO_BUFFER_SIZE * 2 elements of type int32_t.
+  // - Each int32_t is 4 bytes.
+  // - The HAL_I2S_Receive_DMA function's size parameter is in uint16_t (2 bytes).
+  // - So, size = (AUDIO_BUFFER_SIZE * 2 * 4 bytes) / 2 bytes = AUDIO_BUFFER_SIZE * 4.
+  HAL_I2S_Receive_DMA(&i2s1Handle, (uint16_t*)tracker.i2s1_rx_buffer, AUDIO_BUFFER_SIZE * 4);
+  HAL_I2S_Receive_DMA(&i2s4Handle, (uint16_t*)tracker.i2s4_rx_buffer, AUDIO_BUFFER_SIZE * 4);
+
+  // --- Main Application Loop (Super Loop) ---
   while (1)
   {
-
+	  // Continuously call the main processing function. This function is non-blocking;
+	  // it checks for data availability and returns if none is ready.
+	  DroneTracker_Process(&tracker);
   }
 }
 
+/**
+  * @brief  DMA Half Transfer Complete callback for I2S.
+  * @param  hi2s: pointer to a I2S_HandleTypeDef structure.
+  * @retval None
+  * This function is called by the DMA ISR when the first half of the circular buffer is filled.
+  */
 void HAL_I2S_RxHalfCpltCallback(I2S_HandleTypeDef *hi2s)
 {
+  // Check which I2S peripheral triggered the interrupt.
   if (hi2s->Instance == SPI1)
   {
-    i2s1_data_ptr = &i2s1_rx_buffer[0];
-    i2s1_data_ready = true;
+	  // Point the active pointer to the beginning of the buffer (the first half).
+	  tracker.i2s1_active_ptr = &tracker.i2s1_rx_buffer[0];
+	  // Set the flag to notify the main loop that data is ready for processing.
+	  tracker.i2s1_data_ready = true;
   }
   else if (hi2s->Instance == SPI4)
   {
-    i2s4_data_ptr = &i2s4_rx_buffer[0];
-    i2s4_data_ready = true;
+	  tracker.i2s4_active_ptr = &tracker.i2s4_rx_buffer[0];
+	  tracker.i2s4_data_ready = true;
   }
 }
 
+/**
+  * @brief  DMA Full Transfer Complete callback for I2S.
+  * @param  hi2s: pointer to a I2S_HandleTypeDef structure.
+  * @retval None
+  * This function is called by the DMA ISR when the second half of the circular buffer is filled.
+  */
 void HAL_I2S_RxCpltCallback(I2S_HandleTypeDef *hi2s)
 {
+  // Check which I2S peripheral triggered the interrupt.
   if (hi2s->Instance == SPI1)
   {
-    i2s1_data_ptr = &i2s1_rx_buffer[AUDIO_BUFFER_SIZE];
-    i2s1_data_ready = true;
+	  // Point the active pointer to the middle of the buffer (the second half).
+	  tracker.i2s1_active_ptr = &tracker.i2s1_rx_buffer[AUDIO_BUFFER_SIZE];
+	  // Set the flag to notify the main loop.
+	  tracker.i2s1_data_ready = true;
   }
   else if (hi2s->Instance == SPI4)
   {
-    i2s4_data_ptr = &i2s4_rx_buffer[AUDIO_BUFFER_SIZE];
-    i2s4_data_ready = true;
+	  tracker.i2s4_active_ptr = &tracker.i2s4_rx_buffer[AUDIO_BUFFER_SIZE];
+	  tracker.i2s4_data_ready = true;
   }
 }
 
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  * This function is typically generated by STM32CubeMX and configures the main
+  * system clocks (SYSCLK, HCLK, PCLKs) and the dedicated PLLI2S for audio.
+  */
 void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
 
+  // Basic PLL configuration
   __HAL_RCC_PLL_PLLM_CONFIG(16);
-
   __HAL_RCC_PLL_PLLSOURCE_CONFIG(RCC_PLLSOURCE_HSE);
 
+  // Enable Power Control clock and configure voltage scaling.
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
+  // Configure the main oscillators (HSE in this case).
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) Error_Handler();
 
+  // Configure the AHB and APB bus clocks.
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSE;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
-
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK) Error_Handler();
 
+  // Enable the Clock Security System.
   HAL_RCC_EnableCSS();
 
+  // Configure the dedicated PLLI2S for the I2S peripherals to ensure an accurate audio clock.
   PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_I2S;
   PeriphClkInitStruct.PLLI2S.PLLI2SN = 192;
   PeriphClkInitStruct.PLLI2S.PLLI2SM = 16;
@@ -101,6 +158,12 @@ void SystemClock_Config(void)
 }
 
 
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  * This function is called by HAL functions when a critical error is detected.
+  * It disables interrupts and enters an infinite loop to halt the system.
+  */
 void Error_Handler(void)
 {
   __disable_irq();
@@ -110,8 +173,16 @@ void Error_Handler(void)
 }
 
 #ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  * where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-
+  // User can add their own implementation to report the file name and line number,
+  // ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line)
 }
 #endif
