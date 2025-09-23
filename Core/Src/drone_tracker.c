@@ -46,8 +46,8 @@ void DroneTracker_Process(DroneTracker_t* tracker)
     tracker->i2s1_data_ready = false;
     tracker->i2s4_data_ready = false;
 
-    arm_copy_f32(tracker->mic_samples[0], tracker->processing_buffer, ANALYSIS_SIZE);
     deinterleave_and_convert(local_i2s1_ptr, tracker->mic_samples[0], tracker->mic_samples[1], ANALYSIS_SIZE);
+    arm_copy_f32(tracker->mic_samples[0], tracker->processing_buffer, ANALYSIS_SIZE);
 
     arm_biquad_cascade_df1_f32(&tracker->filter_instance, tracker->processing_buffer, tracker->processing_buffer, ANALYSIS_SIZE);
     arm_rfft_fast_f32(&tracker->fft_instance, tracker->processing_buffer, tracker->fft_output, 0);
@@ -135,17 +135,16 @@ static float32_t calculate_tdoa_angle(DroneTracker_t* tracker, float32_t* micA_s
     return angle_deg;
 }
 
-static float32_t smooth_angle(float32_t new_angle, float32_t* history_buffer, uint32_t* history_index)
+static float32_t smooth_angle_optimized(float32_t new_angle, float32_t* history_buffer, uint32_t* history_index, float32_t* current_sum)
 {
-	history_buffer[*history_index] = new_angle;
+    *current_sum -= history_buffer[*history_index];
 
-	*history_index = (*history_index +1) % ANGLE_SMOOTHING_WINDOW_SIZE;
+    *current_sum += new_angle;
+    history_buffer[*history_index] = new_angle;
 
-	float32_t sum = 0.0f;
-	for (int i = 0; i < ANGLE_SMOOTHING_WINDOW_SIZE; i++)
-		sum += history_buffer[i];
+    *history_index = (*history_index + 1) % ANGLE_SMOOTHING_WINDOW_SIZE;
 
-	return sum / ANGLE_SMOOTHING_WINDOW_SIZE;
+    return *current_sum / ANGLE_SMOOTHING_WINDOW_SIZE;
 }
 
 static void set_servo_position(uint32_t channel, float32_t angle)
@@ -153,7 +152,7 @@ static void set_servo_position(uint32_t channel, float32_t angle)
 	if (angle < input_angle_min) angle = input_angle_min;
 	if (angle > input_angle_max) angle = input_angle_max;
 
-	float32_t mapped_value = pulse_center * (angle / input_angle_max) * (pulse_max - pulse_center);
+    float32_t mapped_value = (angle - input_angle_min) * (pulse_max - pulse_min) / (input_angle_max - input_angle_min) + pulse_min;
 
 	__HAL_TIM_SET_COMPARE(&timerHandle, channel, (uint32_t)mapped_value);
 }
